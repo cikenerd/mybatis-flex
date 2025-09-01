@@ -1,0 +1,328 @@
+name: PostgreSQL 性能基准测试
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_scale:
+        description: '测试数据规模'
+        required: true
+        default: 'medium'
+        type: choice
+        options:
+          - small    # 1K账户, 5K文章
+          - medium   # 10K账户, 50K文章
+          - large    # 50K账户, 200K文章
+      test_type:
+        description: '测试类型'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - crud
+          - join
+          - pagination
+          - count-optimization
+  schedule:
+    # 每周日凌晨2点运行性能基准测试
+    - cron: '0 2 * * 0'
+
+jobs:
+  postgresql-performance:
+    name: PostgreSQL 性能基准测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mybatis_flex_perf_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --shared-buffers=256MB
+          --max_connections=100
+          --work_mem=4MB
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置 JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: 等待 PostgreSQL 启动
+      run: |
+        sudo apt-get update && sudo apt-get install -y postgresql-client
+        timeout 60s bash -c 'until pg_isready -h localhost -p 5432 -U postgres; do sleep 2; done'
+        echo "✅ PostgreSQL 已准备就绪"
+
+    - name: 初始化性能测试数据库
+      run: |
+        echo "🚀 初始化性能测试数据库..."
+        
+        # 创建基础表结构
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_perf_test \
+          -f mybatis-flex-test/mybatis-flex-postgresql-test/src/main/resources/schema-postgresql.sql
+        
+        # 根据测试规模生成不同数量的测试数据
+        case "${{ github.event.inputs.test_scale || 'medium' }}" in
+          "small")
+            ACCOUNT_COUNT=1000
+            ARTICLE_MULTIPLIER=5
+            ;;
+          "medium")
+            ACCOUNT_COUNT=10000
+            ARTICLE_MULTIPLIER=5
+            ;;
+          "large")
+            ACCOUNT_COUNT=50000
+            ARTICLE_MULTIPLIER=4
+            ;;
+        esac
+        
+        echo "📊 生成测试数据: ${ACCOUNT_COUNT} 个账户, 约 $((ACCOUNT_COUNT * ARTICLE_MULTIPLIER)) 篇文章"
+        
+        # 生成大量账户数据
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_perf_test -c "
+          INSERT INTO tb_account (user_name, age, sex, birthday, options, is_normal, is_delete)
+          SELECT 
+            '性能测试用户' || generate_series,
+            (random() * 60 + 18)::int,
+            (random() + 1)::int,
+            CURRENT_DATE - (random() * 365 * 30)::int,
+            CASE 
+              WHEN random() > 0.8 THEN '{\"premium\": true, \"level\":' || (random() * 10)::int || '}'
+              ELSE '{\"premium\": false, \"level\":' || (random() * 5)::int || '}'
+            END,
+            CASE WHEN random() > 0.1 THEN 1 ELSE 0 END,
+            CASE WHEN random() > 0.95 THEN 1 ELSE 0 END
+          FROM generate_series(1, ${ACCOUNT_COUNT});
+        "
+        
+        # 生成大量文章数据
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_perf_test -c "
+          INSERT INTO tb_article (account_id, title, content, is_delete)
+          SELECT 
+            (random() * ${ACCOUNT_COUNT} + 1)::int,
+            '性能测试文章标题' || generate_series || ' - ' || 
+            CASE (random() * 5)::int
+              WHEN 0 THEN 'Java开发'
+              WHEN 1 THEN 'Spring Boot'
+              WHEN 2 THEN 'MyBatis-Flex'
+              WHEN 3 THEN 'PostgreSQL'
+              ELSE '数据库优化'
+            END,
+            '这是第' || generate_series || '篇性能测试文章的详细内容，包含了大量的文本数据用于测试查询性能。' ||
+            repeat('内容填充文本，模拟真实文章长度。', (random() * 20 + 5)::int),
+            CASE WHEN random() > 0.9 THEN 1 ELSE 0 END
+          FROM generate_series(1, ${ACCOUNT_COUNT} * ${ARTICLE_MULTIPLIER});
+        "
+        
+        # 创建性能优化索引
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_perf_test -c "
+          CREATE INDEX CONCURRENTLY idx_account_age_sex ON tb_account(age, sex) WHERE is_delete = 0;
+          CREATE INDEX CONCURRENTLY idx_account_user_name ON tb_account(user_name) WHERE is_delete = 0;
+          CREATE INDEX CONCURRENTLY idx_article_account_id ON tb_article(account_id) WHERE is_delete = 0;
+          CREATE INDEX CONCURRENTLY idx_article_title ON tb_article USING gin(to_tsvector('english', title));
+          CREATE INDEX CONCURRENTLY idx_article_created_at ON tb_article(created_at) WHERE is_delete = 0;
+        "
+        
+        # 更新表统计信息
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_perf_test -c "ANALYZE tb_account; ANALYZE tb_article;"
+        
+        # 显示数据统计
+        echo "📈 数据库统计信息:"
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_perf_test -c "
+          SELECT 
+            'tb_account' as table_name,
+            COUNT(*) as total_rows,
+            COUNT(*) FILTER (WHERE is_delete = 0) as active_rows
+          FROM tb_account
+          UNION ALL
+          SELECT 
+            'tb_article' as table_name,
+            COUNT(*) as total_rows,
+            COUNT(*) FILTER (WHERE is_delete = 0) as active_rows
+          FROM tb_article;
+        "
+
+    - name: 编译性能测试模块
+      run: |
+        echo "🔨 编译性能测试模块..."
+        mvn compile test-compile -pl mybatis-flex-test/mybatis-flex-postgresql-test -B -q
+
+    - name: 运行基础 CRUD 性能测试
+      if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'crud'
+      run: |
+        echo "🧪 运行基础 CRUD 性能测试..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test \
+          -Dtest="PostgreSQLBasicCrudTest" -B -Pci \
+          -Dmaven.test.failure.ignore=false
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_perf_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+        PERFORMANCE_TEST: true
+
+    - name: 运行 JOIN 查询性能测试
+      if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'join'
+      run: |
+        echo "🔗 运行 JOIN 查询性能测试..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test \
+          -Dtest="PostgreSQLJoinTest" -B -Pci \
+          -Dmaven.test.failure.ignore=false
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_perf_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+        PERFORMANCE_TEST: true
+
+    - name: 运行分页性能基准测试
+      if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'pagination'
+      run: |
+        echo "📄 运行分页性能基准测试..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test \
+          -Dtest="PostgreSQLJoinTest#testLargeDataJoinPagination" -B -Pci \
+          -Dmaven.test.failure.ignore=false
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_perf_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+        PERFORMANCE_TEST: true
+
+    - name: 运行 COUNT 查询优化基准测试
+      if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'count-optimization'
+      run: |
+        echo "📊 运行 COUNT 查询优化基准测试..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test \
+          -Dtest="*#testOptimizeCountQuery" -B -Pci \
+          -Dmaven.test.failure.ignore=false
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_perf_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+        PERFORMANCE_TEST: true
+
+    - name: 生成性能基准报告
+      if: always()
+      run: |
+        echo "📊 === PostgreSQL 性能基准测试报告 ===" 
+        echo "测试规模: ${{ github.event.inputs.test_scale || 'medium' }}"
+        echo "测试类型: ${{ github.event.inputs.test_type || 'all' }}"
+        echo "执行时间: $(date)"
+        echo "PostgreSQL 版本: 15"
+        echo ""
+        
+        # 显示数据库性能统计
+        echo "🎯 数据库性能统计:"
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_perf_test -c "
+          SELECT 
+            schemaname,
+            tablename,
+            seq_scan,
+            seq_tup_read,
+            idx_scan,
+            idx_tup_fetch,
+            n_tup_ins,
+            n_tup_upd,
+            n_tup_del
+          FROM pg_stat_user_tables 
+          WHERE schemaname = 'public';
+        "
+        
+        echo ""
+        echo "🔍 索引使用统计:"
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_perf_test -c "
+          SELECT 
+            schemaname,
+            tablename,
+            indexname,
+            idx_scan,
+            idx_tup_read,
+            idx_tup_fetch
+          FROM pg_stat_user_indexes 
+          WHERE schemaname = 'public'
+          ORDER BY idx_scan DESC;
+        "
+        
+        # 解析测试报告
+        if [ -d mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/ ]; then
+          echo ""
+          echo "🧪 测试执行结果:"
+          cd mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/
+          
+          total_tests=0
+          total_time=0
+          
+          for file in *.xml; do
+            if [ -f "$file" ]; then
+              tests=$(grep -o 'tests="[0-9]*"' "$file" | cut -d'"' -f2)
+              time=$(grep -o 'time="[0-9.]*"' "$file" | cut -d'"' -f2)
+              class_name=$(basename "$file" .xml | sed 's/TEST-//')
+              
+              echo "  📋 $class_name: $tests 个测试, 耗时 ${time}s"
+              
+              total_tests=$((total_tests + tests))
+              total_time=$(echo "$total_time + $time" | bc -l)
+            fi
+          done
+          
+          echo ""
+          echo "📈 性能基准总结:"
+          echo "  - 总测试数: $total_tests"
+          echo "  - 总耗时: ${total_time}s"
+          echo "  - 平均每测试耗时: $(echo "scale=3; $total_time / $total_tests" | bc)s"
+          
+          # 性能基准判断
+          if (( $(echo "$total_time < 30" | bc -l) )); then
+            echo "  ✅ 性能表现: 优秀 (< 30s)"
+          elif (( $(echo "$total_time < 60" | bc -l) )); then
+            echo "  ✅ 性能表现: 良好 (30s-60s)"
+          elif (( $(echo "$total_time < 120" | bc -l) )); then
+            echo "  ⚠️  性能表现: 一般 (60s-120s)"
+          else
+            echo "  ❌ 性能表现: 需要优化 (> 120s)"
+          fi
+        else
+          echo "❌ 未找到测试报告"
+        fi
+
+    - name: 上传性能测试报告
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: postgresql-performance-${{ github.event.inputs.test_scale || 'medium' }}-${{ github.event.inputs.test_type || 'all' }}-report
+        path: |
+          mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/
+          mybatis-flex-test/mybatis-flex-postgresql-test/target/site/
+        retention-days: 30
+
+    - name: 性能回归检查
+      if: github.event.inputs.test_type == 'all'
+      run: |
+        echo "🔍 性能回归检查..."
+        
+        # 这里可以添加与历史性能数据的对比逻辑
+        # 例如：与上次的性能基准进行对比，如果性能下降超过20%则警告
+        
+        echo "💡 建议："
+        echo "  - 定期运行性能基准测试"
+        echo "  - 关注慢查询和索引使用情况"
+        echo "  - 监控数据库连接池和内存使用"
+        echo "  - 考虑在更大规模数据上进行压力测试"

@@ -1,0 +1,251 @@
+name: PostgreSQL 集成测试
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'mybatis-flex-test/mybatis-flex-postgresql-test/**'
+      - 'mybatis-flex-core/**'
+      - 'mybatis-flex-annotation/**'
+      - 'mybatis-flex-spring-boot-starter/**'
+      - '.github/workflows/postgresql-tests.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'mybatis-flex-test/mybatis-flex-postgresql-test/**'
+      - 'mybatis-flex-core/**'
+      - 'mybatis-flex-annotation/**'
+      - 'mybatis-flex-spring-boot-starter/**'
+      - '.github/workflows/postgresql-tests.yml'
+
+jobs:
+  postgresql-tests:
+    name: PostgreSQL 集成测试
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mybatis_flex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    strategy:
+      matrix:
+        java-version: [17, 21]
+        
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置 JDK ${{ matrix.java-version }}
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ matrix.java-version }}
+        distribution: 'temurin'
+        cache: maven
+
+    - name: 验证 PostgreSQL 服务
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client
+        until pg_isready -h localhost -p 5432 -U postgres; do
+          echo "等待 PostgreSQL 启动..."
+          sleep 2
+        done
+        echo "PostgreSQL 已准备就绪"
+
+    - name: 初始化 PostgreSQL 数据库
+      run: |
+        # 创建数据库表结构
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_test -f mybatis-flex-test/mybatis-flex-postgresql-test/src/main/resources/schema-postgresql.sql
+        
+        # 插入测试数据
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_test -f mybatis-flex-test/mybatis-flex-postgresql-test/src/main/resources/data-postgresql.sql
+        
+        echo "PostgreSQL 数据库初始化完成"
+
+    - name: 运行 PostgreSQL 集成测试
+      run: |
+        echo "开始运行 PostgreSQL 集成测试..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test -B -V -Pci
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+
+    - name: 生成测试报告
+      if: always()
+      run: |
+        echo "=== PostgreSQL 集成测试结果 ==="
+        if [ -f mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/*.xml ]; then
+          echo "测试报告文件已生成"
+          find mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/ -name "*.xml" -exec cat {} \;
+        else
+          echo "未找到测试报告文件"
+        fi
+
+    - name: 上传测试报告
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: postgresql-test-reports-jdk${{ matrix.java-version }}
+        path: |
+          mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/
+          mybatis-flex-test/mybatis-flex-postgresql-test/target/site/
+        retention-days: 30
+
+  test-different-postgresql-versions:
+    name: 多版本 PostgreSQL 测试
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        postgres-version: [12, 13, 14, 15, 16]
+        
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mybatis_flex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置 JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: 验证 PostgreSQL ${{ matrix.postgres-version }} 服务
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client
+        until pg_isready -h localhost -p 5432 -U postgres; do
+          echo "等待 PostgreSQL ${{ matrix.postgres-version }} 启动..."
+          sleep 2
+        done
+        echo "PostgreSQL ${{ matrix.postgres-version }} 已准备就绪"
+        
+        # 显示 PostgreSQL 版本信息
+        PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "SELECT version();"
+
+    - name: 初始化 PostgreSQL 数据库
+      run: |
+        # 创建数据库表结构
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_test -f mybatis-flex-test/mybatis-flex-postgresql-test/src/main/resources/schema-postgresql.sql
+        
+        # 插入测试数据
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_test -f mybatis-flex-test/mybatis-flex-postgresql-test/src/main/resources/data-postgresql.sql
+
+    - name: 运行 PostgreSQL ${{ matrix.postgres-version }} 集成测试
+      run: |
+        echo "开始在 PostgreSQL ${{ matrix.postgres-version }} 上运行集成测试..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test -B -V -Pci
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+
+  performance-test:
+    name: PostgreSQL 性能基准测试
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mybatis_flex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置 JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: 初始化 PostgreSQL 数据库
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client
+        until pg_isready -h localhost -p 5432 -U postgres; do
+          sleep 2
+        done
+        
+        # 创建数据库表结构
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_test -f mybatis-flex-test/mybatis-flex-postgresql-test/src/main/resources/schema-postgresql.sql
+        
+        # 插入大量测试数据用于性能测试
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_test -c "
+          INSERT INTO tb_account (user_name, age, sex, birthday, is_normal, is_delete)
+          SELECT 
+            '性能测试用户' || generate_series,
+            (random() * 80 + 18)::int,
+            (random() + 1)::int,
+            CURRENT_DATE - (random() * 365 * 30)::int,
+            1,
+            0
+          FROM generate_series(1, 10000);
+        "
+
+    - name: 运行性能基准测试
+      run: |
+        echo "开始运行 PostgreSQL 性能基准测试..."
+        # 运行特定的性能测试
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test -Dtest="*Performance*" -B -V -Pci || echo "未找到性能测试，运行所有测试进行性能评估"
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test -B -V -Pci
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+
+    - name: 生成性能报告
+      if: always()
+      run: |
+        echo "=== PostgreSQL 性能测试总结 ==="
+        echo "测试完成时间: $(date)"
+        echo "数据库版本: PostgreSQL 15"
+        echo "测试数据量: 约10,000条记录"
+        if [ -f mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/*.xml ]; then
+          grep -l "time=" mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/*.xml | head -5
+        fi

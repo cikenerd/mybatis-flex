@@ -1,0 +1,225 @@
+name: PostgreSQL 特性验证
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: '测试类型'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - basic-crud
+          - join-queries  
+          - special-features
+          - count-optimization
+      postgres_version:
+        description: 'PostgreSQL 版本'
+        required: true
+        default: '15'
+        type: choice
+        options:
+          - '12'
+          - '13' 
+          - '14'
+          - '15'
+          - '16'
+
+jobs:
+  feature-tests:
+    name: PostgreSQL ${{ github.event.inputs.postgres_version }} 特性测试
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:${{ github.event.inputs.postgres_version }}-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mybatis_flex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置 JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: 验证 PostgreSQL 连接
+      run: |
+        sudo apt-get update && sudo apt-get install -y postgresql-client
+        timeout 60s bash -c 'until pg_isready -h localhost -p 5432 -U postgres; do sleep 2; done'
+        echo "✅ PostgreSQL ${{ github.event.inputs.postgres_version }} 连接成功"
+        
+        # 显示版本信息
+        PGPASSWORD=postgres psql -h localhost -U postgres -c "SELECT version();"
+
+    - name: 初始化测试环境
+      run: |
+        echo "🚀 初始化 PostgreSQL 测试环境..."
+        
+        # 创建数据库结构
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_test \
+          -f mybatis-flex-test/mybatis-flex-postgresql-test/src/main/resources/schema-postgresql.sql
+        
+        # 插入测试数据
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_test \
+          -f mybatis-flex-test/mybatis-flex-postgresql-test/src/main/resources/data-postgresql.sql
+        
+        echo "✅ 数据库初始化完成"
+
+    - name: 运行基础 CRUD 测试
+      if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'basic-crud'
+      run: |
+        echo "🧪 运行基础 CRUD 测试..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test \
+          -Dtest="PostgreSQLBasicCrudTest" -B -V -Pci
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+
+    - name: 运行 JOIN 查询测试
+      if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'join-queries'
+      run: |
+        echo "🔗 运行 JOIN 查询测试..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test \
+          -Dtest="PostgreSQLJoinTest" -B -V -Pci
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+
+    - name: 运行 PostgreSQL 特有功能测试
+      if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'special-features'
+      run: |
+        echo "⚡ 运行 PostgreSQL 特有功能测试..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test \
+          -Dtest="PostgreSQLSpecialFeaturesTest" -B -V -Pci
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+
+    - name: 运行 COUNT 查询优化测试
+      if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'count-optimization'
+      run: |
+        echo "📈 运行 COUNT 查询优化测试..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test \
+          -Dtest="*#testOptimizeCountQuery" -B -V -Pci
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+
+    - name: 运行完整测试套件
+      if: github.event.inputs.test_type == 'all'
+      run: |
+        echo "🎯 运行完整 PostgreSQL 测试套件..."
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test -B -Pci
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+
+    - name: 生成测试特性报告
+      if: always()
+      run: |
+        echo "📊 === PostgreSQL ${{ github.event.inputs.postgres_version }} 特性测试报告 ==="
+        echo "测试类型: ${{ github.event.inputs.test_type }}"
+        echo "执行时间: $(date)"
+        echo "环境信息:"
+        echo "  - PostgreSQL 版本: ${{ github.event.inputs.postgres_version }}"
+        echo "  - Java 版本: $(java -version 2>&1 | head -n 1)"
+        echo ""
+        
+        if [ -d mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/ ]; then
+          echo "🔍 测试结果详情:"
+          cd mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/
+          total_tests=0
+          total_failures=0
+          total_errors=0
+          total_time=0
+          
+          for file in *.xml; do
+            if [ -f "$file" ]; then
+              tests=$(grep -o 'tests="[0-9]*"' "$file" | cut -d'"' -f2)
+              failures=$(grep -o 'failures="[0-9]*"' "$file" | cut -d'"' -f2)
+              errors=$(grep -o 'errors="[0-9]*"' "$file" | cut -d'"' -f2)
+              time=$(grep -o 'time="[0-9.]*"' "$file" | cut -d'"' -f2)
+              
+              class_name=$(basename "$file" .xml | sed 's/TEST-//')
+              
+              if [ "$failures" -eq 0 ] && [ "$errors" -eq 0 ]; then
+                status="✅ 通过"
+              else
+                status="❌ 失败"
+              fi
+              
+              echo "  $status $class_name: $tests 个测试, 耗时 ${time}s"
+              
+              total_tests=$((total_tests + tests))
+              total_failures=$((total_failures + failures))
+              total_errors=$((total_errors + errors))
+              total_time=$(echo "$total_time + $time" | bc -l 2>/dev/null || echo "$total_time")
+            fi
+          done
+          
+          echo ""
+          echo "📈 总体统计:"
+          echo "  - 总测试数: $total_tests"
+          echo "  - 成功: $((total_tests - total_failures - total_errors))"
+          echo "  - 失败: $total_failures"
+          echo "  - 错误: $total_errors"
+          echo "  - 成功率: $(( (total_tests - total_failures - total_errors) * 100 / total_tests ))%"
+          echo "  - 总耗时: ${total_time}s"
+        else
+          echo "❌ 未找到测试报告"
+        fi
+
+    - name: 检查特定 PostgreSQL 功能
+      run: |
+        echo "🔍 验证 PostgreSQL 特有功能..."
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_test -c "
+          -- 检查 SERIAL 主键
+          SELECT column_name, data_type, column_default 
+          FROM information_schema.columns 
+          WHERE table_name = 'tb_account' AND column_name = 'id';
+          
+          -- 检查外键约束
+          SELECT constraint_name, constraint_type
+          FROM information_schema.table_constraints 
+          WHERE table_name = 'tb_article' AND constraint_type = 'FOREIGN KEY';
+          
+          -- 检查触发器
+          SELECT trigger_name, event_manipulation, action_statement
+          FROM information_schema.triggers
+          WHERE event_object_table = 'tb_article';
+        "
+
+    - name: 上传特性测试报告
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: postgresql-${{ github.event.inputs.postgres_version }}-features-${{ github.event.inputs.test_type }}-report
+        path: |
+          mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/
+          mybatis-flex-test/mybatis-flex-postgresql-test/target/site/
+        retention-days: 7

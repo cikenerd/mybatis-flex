@@ -1,0 +1,35 @@
+spring:
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://127.0.0.1:5432/mybatis_flex_test
+    username: postgres
+    password: postgres
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  # SQL 初始化配置
+  sql:
+    init:
+      mode: never
+
+# MyBatis-Flex 配置
+mybatis-flex:
+  global-config:
+    print-banner: false
+    # 明确指定使用 PostgreSQL 方言
+    db-type: postgresql
+  configuration:
+    # 打印 SQL 日志
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    # 驼峰命名转换
+    map-underscore-to-camel-case: true
+
+# 日志配置
+logging:
+  level:
+    com.mybatisflex.test.postgresql.mapper: DEBUG
+    org.springframework.jdbc: DEBUG

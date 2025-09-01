@@ -1,0 +1,89 @@
+name: PostgreSQL 快速测试
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/postgresql-*'
+      - 'fix/postgresql-*'
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  quick-test:
+    name: PostgreSQL 快速集成测试
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mybatis_flex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置 JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: 等待 PostgreSQL 启动
+      run: |
+        sudo apt-get update && sudo apt-get install -y postgresql-client
+        timeout 60s bash -c 'until pg_isready -h localhost -p 5432 -U postgres; do sleep 2; done'
+
+    - name: 初始化数据库
+      run: |
+        # 初始化数据库结构和数据
+        PGPASSWORD=postgres psql -h localhost -U postgres -d mybatis_flex_test \
+          -f mybatis-flex-test/mybatis-flex-postgresql-test/src/main/resources/schema-postgresql.sql \
+          -f mybatis-flex-test/mybatis-flex-postgresql-test/src/main/resources/data-postgresql.sql
+
+    - name: 编译项目
+      run: mvn compile -pl mybatis-flex-test/mybatis-flex-postgresql-test -B -q
+
+    - name: 运行 PostgreSQL 测试
+      run: |
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test -B -Pci \
+          -Dmaven.test.failure.ignore=false
+      env:
+        CI: true
+        SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_test
+        SPRING_DATASOURCE_USERNAME: postgres
+        SPRING_DATASOURCE_PASSWORD: postgres
+
+    - name: 测试结果摘要
+      if: always()
+      run: |
+        echo "=== 测试结果摘要 ==="
+        if [ -d mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/ ]; then
+          cd mybatis-flex-test/mybatis-flex-postgresql-test/target/surefire-reports/
+          echo "测试文件数量: $(ls -1 *.xml 2>/dev/null | wc -l)"
+          for file in *.xml; do
+            if [ -f "$file" ]; then
+              tests=$(grep -o 'tests="[0-9]*"' "$file" | grep -o '[0-9]*')
+              failures=$(grep -o 'failures="[0-9]*"' "$file" | grep -o '[0-9]*')
+              errors=$(grep -o 'errors="[0-9]*"' "$file" | grep -o '[0-9]*')
+              time=$(grep -o 'time="[0-9.]*"' "$file" | grep -o '[0-9.]*')
+              echo "📊 $file: 测试${tests}个, 失败${failures}个, 错误${errors}个, 耗时${time}s"
+            fi
+          done
+        else
+          echo "❌ 未找到测试报告"
+        fi
