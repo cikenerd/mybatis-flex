@@ -133,9 +133,10 @@ class PostgreSQLJoinTest {
         List<Row> results = accountMapper.selectRowsByQuery(queryWrapper);
         
         System.out.println("RIGHT JOIN 查询结果数量: " + results.size());
+        System.out.println("预期结果数量: 10条 (基础测试数据中ID<=20且未删除的文章)");
         if (!results.isEmpty()) {
-            System.out.println("RIGHT JOIN 查询结果 (前3条):");
-            for (int i = 0; i < Math.min(3, results.size()); i++) {
+            System.out.println("RIGHT JOIN 查询结果 (所有数据):");
+            for (int i = 0; i < results.size(); i++) {
                 Row row = results.get(i);
                 System.out.printf("文章: %s (ID: %d) -> 作者: %s%n",
                     row.getString("title"),
@@ -145,12 +146,10 @@ class PostgreSQLJoinTest {
             }
         }
 
-        // 基于基础测试数据的合理预期：从data-postgresql.sql可以看到有12篇基础文章(ID 1-12)
-        // 其中2篇被软删除(ID=8, ID=11对应的文章)，所以实际应该有10篇可用文章
-        assertTrue(results.size() >= 10, "RIGHT JOIN查询应该返回至少10条基础测试数据（考虑软删除）");
-        
-        // 验证RIGHT JOIN的特性：结果中应该包含所有匹配的文章，限制ID<=20确保只使用基础数据  
-        assertTrue(results.size() <= 20, "查询结果不应超过基础测试数据范围（限制ID<=20）");
+        // 基于实际查询条件验证：ID<=20且is_delete=0的文章数量
+        // 从本地测试可知应该是10条记录
+        assertEquals(10, results.size(), 
+            String.format("RIGHT JOIN查询应该返回10条数据（ID<=20且未删除），实际返回%d条", results.size()));
 
         // 验证所有结果都有文章数据
         for (Row row : results) {
