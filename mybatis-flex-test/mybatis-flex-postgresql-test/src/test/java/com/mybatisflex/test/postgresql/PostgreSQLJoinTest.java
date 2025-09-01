@@ -21,10 +21,12 @@ import com.mybatisflex.core.query.QueryWrapper;
 import com.mybatisflex.core.row.Row;
 import com.mybatisflex.test.postgresql.mapper.AccountMapper;
 import com.mybatisflex.test.postgresql.mapper.ArticleMapper;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 
@@ -38,7 +40,6 @@ import static org.junit.jupiter.api.Assertions.*;
  * @author kk
  */
 @SpringBootTest
-@Transactional // 确保每个测试方法后自动回滚
 class PostgreSQLJoinTest {
 
     @Autowired
@@ -46,6 +47,28 @@ class PostgreSQLJoinTest {
 
     @Autowired
     private ArticleMapper articleMapper;
+    
+    private static JdbcTemplate staticJdbcTemplate;
+    
+    @Autowired
+    void setJdbcTemplate(JdbcTemplate jdbcTemplate) {
+        PostgreSQLJoinTest.staticJdbcTemplate = jdbcTemplate;
+    }
+
+
+    @AfterAll
+    static void cleanupDatabase() {
+        // 清空所有表数据，重置序列，确保测试完成后数据库都是干净的，和CI环境一致
+        if (staticJdbcTemplate != null) {
+            try {
+                staticJdbcTemplate.execute("TRUNCATE TABLE tb_article RESTART IDENTITY CASCADE");
+                staticJdbcTemplate.execute("TRUNCATE TABLE tb_account RESTART IDENTITY CASCADE");
+                System.out.println("✅ 所有测试完成，数据库表已清空，序列已重置");
+            } catch (Exception e) {
+                System.out.println("⚠️ 清空数据库失败: " + e.getMessage());
+            }
+        }
+    }
 
     @Test
     void testInnerJoinQuery() {
@@ -133,7 +156,6 @@ class PostgreSQLJoinTest {
         List<Row> results = accountMapper.selectRowsByQuery(queryWrapper);
         
         System.out.println("RIGHT JOIN 查询结果数量: " + results.size());
-        System.out.println("预期结果数量: 10条 (基础测试数据中ID<=20且未删除的文章)");
         if (!results.isEmpty()) {
             System.out.println("RIGHT JOIN 查询结果 (所有数据):");
             for (int i = 0; i < results.size(); i++) {
@@ -146,10 +168,17 @@ class PostgreSQLJoinTest {
             }
         }
 
-        // 基于实际查询条件验证：ID<=20且is_delete=0的文章数量
-        // 从本地测试可知应该是10条记录
-        assertEquals(10, results.size(), 
-            String.format("RIGHT JOIN查询应该返回10条数据（ID<=20且未删除），实际返回%d条", results.size()));
+        // 1. 第一批文章ID 1-12：其中ID 8,11被删除，剩余10篇(1,2,3,4,5,6,7,9,10,12)
+        // 2. 第二批文章ID 13-20：全部未删除，共8篇(13,14,15,16,17,18,19,20)
+        // 3. 总计：10 + 8 = 18条记录
+        assertEquals(18, results.size(), 
+            String.format("RIGHT JOIN查询期望18条数据（ID<=20且未删除），实际返回%d条", results.size()));
+        
+        // 验证查询条件正确：所有结果的文章ID都应该<=20
+        for (Row row : results) {
+            Long articleId = row.getLong("article_id");
+            assertTrue(articleId <= 20, String.format("文章ID %d 应该 <= 20", articleId));
+        }
 
         // 验证所有结果都有文章数据
         for (Row row : results) {
