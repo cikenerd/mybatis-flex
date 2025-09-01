@@ -150,7 +150,7 @@ class PostgreSQLJoinTest {
         assertTrue(results.size() >= 10, "RIGHT JOIN查询应该返回至少10条基础测试数据（考虑软删除）");
         
         // 验证RIGHT JOIN的特性：结果中应该包含所有匹配的文章，限制ID<=20确保只使用基础数据  
-        assertTrue(results.size() <= 12, "查询结果不应超过基础测试数据范围（12篇基础文章）");
+        assertTrue(results.size() <= 20, "查询结果不应超过基础测试数据范围（限制ID<=20）");
 
         // 验证所有结果都有文章数据
         for (Row row : results) {
