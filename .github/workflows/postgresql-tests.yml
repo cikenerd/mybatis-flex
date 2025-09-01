@@ -80,9 +80,10 @@ jobs:
     - name: 运行 PostgreSQL 集成测试
       run: |
         echo "开始运行 PostgreSQL 集成测试..."
-        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test -B -V -Pci
+        mvn test -pl mybatis-flex-test/mybatis-flex-postgresql-test -B -V -Pci -Dperformance.test=true -Dperf.scale=small
       env:
         CI: true
+        PERFORMANCE_TEST: true
         SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/mybatis_flex_test
         SPRING_DATASOURCE_USERNAME: postgres
         SPRING_DATASOURCE_PASSWORD: postgres

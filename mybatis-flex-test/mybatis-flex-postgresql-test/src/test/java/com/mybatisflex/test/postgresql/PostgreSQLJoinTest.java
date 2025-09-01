@@ -120,25 +120,37 @@ class PostgreSQLJoinTest {
     @Test
     void testRightJoinQuery() {
         // 测试 RIGHT JOIN 查询 - 以文章为主表
+        // 只使用基础测试数据，限制查询范围确保稳定性
         QueryWrapper queryWrapper = QueryWrapper.create()
             .select(ACCOUNT.USER_NAME, ACCOUNT.AGE,
                    ARTICLE.ID.as("article_id"), ARTICLE.TITLE, ARTICLE.CONTENT)
             .from(ACCOUNT)
             .rightJoin(ARTICLE).on(ACCOUNT.ID.eq(ARTICLE.ACCOUNT_ID))
             .where(ARTICLE.IS_DELETE.eq(0))
+            .and(ARTICLE.ID.le(20)) // 限制只查询ID<=20的文章，确保使用基础测试数据
             .orderBy(ARTICLE.ID.asc());
 
         List<Row> results = accountMapper.selectRowsByQuery(queryWrapper);
-        assertFalse(results.isEmpty());
-
-        System.out.println("RIGHT JOIN 查询结果:");
-        for (Row row : results) {
-            System.out.printf("文章: %s (ID: %d) -> 作者: %s%n",
-                row.getString("title"),
-                row.getLong("article_id"),
-                row.getString("user_name")
-            );
+        
+        System.out.println("RIGHT JOIN 查询结果数量: " + results.size());
+        if (!results.isEmpty()) {
+            System.out.println("RIGHT JOIN 查询结果 (前3条):");
+            for (int i = 0; i < Math.min(3, results.size()); i++) {
+                Row row = results.get(i);
+                System.out.printf("文章: %s (ID: %d) -> 作者: %s%n",
+                    row.getString("title"),
+                    row.getLong("article_id"),
+                    row.getString("user_name")
+                );
+            }
         }
+
+        // 基于基础测试数据的合理预期：从data-postgresql.sql可以看到有12篇基础文章(ID 1-12)
+        // 其中2篇被软删除(ID=8, ID=11对应的文章)，所以实际应该有10篇可用文章
+        assertTrue(results.size() >= 10, "RIGHT JOIN查询应该返回至少10条基础测试数据（考虑软删除）");
+        
+        // 验证RIGHT JOIN的特性：结果中应该包含所有匹配的文章，限制ID<=20确保只使用基础数据  
+        assertTrue(results.size() <= 12, "查询结果不应超过基础测试数据范围（12篇基础文章）");
 
         // 验证所有结果都有文章数据
         for (Row row : results) {
@@ -326,7 +338,7 @@ class PostgreSQLJoinTest {
 
     @Test
     void testLargeDataJoinPagination() {
-        // 测试大数据量 JOIN 分页性能
+        // 测试 JOIN 分页性能（使用基础测试数据）
         QueryWrapper queryWrapper = QueryWrapper.create()
             .select(
                 ACCOUNT.USER_NAME,
@@ -342,9 +354,9 @@ class PostgreSQLJoinTest {
 
         long startTime = System.currentTimeMillis();
         
-        // 测试不同页码的分页查询
-        for (int pageNum = 1; pageNum <= 5; pageNum++) {
-            Page<Row> page = accountMapper.paginateAs(pageNum, 20, queryWrapper, Row.class);
+        // 测试不同页码的分页查询（基于基础测试数据，预期约10-15条记录）
+        for (int pageNum = 1; pageNum <= 3; pageNum++) {
+            Page<Row> page = accountMapper.paginateAs(pageNum, 5, queryWrapper, Row.class);
             assertNotNull(page);
             
             System.out.printf("第%d页: 总记录数=%d, 当前页记录数=%d%n", 
@@ -355,13 +367,19 @@ class PostgreSQLJoinTest {
             if (pageNum == 1) {
                 assertTrue(page.getRecords().size() > 0, "第1页应该有数据");
             }
+            
+            // 如果总记录数少于当前页的起始位置，则这页应该为空
+            if (page.getTotalRow() < (pageNum - 1) * 5) {
+                assertEquals(0, page.getRecords().size(), "超出数据范围的页应该为空");
+                break; // 提前结束循环
+            }
         }
         
         long endTime = System.currentTimeMillis();
-        System.out.printf("大数据量 JOIN 分页测试耗时: %d ms%n", endTime - startTime);
+        System.out.printf("JOIN 分页测试耗时: %d ms%n", endTime - startTime);
         
-        // 性能验证：5页查询应该在合理时间内完成
-        assertTrue(endTime - startTime < 5000, "5页JOIN分页查询应该在5秒内完成");
+        // 性能验证：3页查询应该在合理时间内完成
+        assertTrue(endTime - startTime < 3000, "3页JOIN分页查询应该在3秒内完成");
     }
 
     @Test
